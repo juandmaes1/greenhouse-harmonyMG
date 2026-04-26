@@ -197,6 +197,7 @@ export default function GreenhouseMap({
     tasks: Task[]
   } | null>(null)
   const [createTaskOpen, setCreateTaskOpen] = useState(false)
+  const [selectedChemical, setSelectedChemical] = useState<string | null>(null)
   const [newTaskName, setNewTaskName] = useState("")
   const [filtersOpen, setFiltersOpen] = useState(false)
   const [filters, setFilters] = useState<FilterState>(createDefaultFilters)
@@ -267,20 +268,39 @@ export default function GreenhouseMap({
   })
 
   const { data: taskDefinitions = [] } = useQuery({
-    queryKey: ["task-definitions"],
-    queryFn: async () => {
-      const { data, error } = await supabase
-        .from("task_definitions")
-        .select("*")
+  queryKey: ["task-definitions"],
+  queryFn: async () => {
+    const { data, error } = await supabase
+      .from("task_definitions")
+      .select("*")
 
-      if (error) {
-        console.error("Error task_definitions:", error)
-        return []
-      }
-
-      return (data ?? []) as TaskDefinition[]
+    if (error) {
+      console.error("Error task_definitions:", error)
+      return []
     }
-  })
+
+    return (data ?? []) as TaskDefinition[]
+  }
+})
+
+
+// 🔥 ESTE ES EL PASO 1 REAL (AGREGAR)
+const { data: chemicals = [] } = useQuery({
+  queryKey: ["chemicals"],
+  queryFn: async () => {
+    const { data, error } = await supabase
+      .from("chemicals")
+      .select("*")
+      .eq("available", true)
+
+    if (error) {
+      console.error("Error chemicals:", error)
+      return []
+    }
+
+    return data ?? []
+  }
+})
 
   const bedMap = useMemo(() => {
     const map = new Map<string, string>()
@@ -446,87 +466,104 @@ export default function GreenhouseMap({
   }
 
   const assignMutation = useMutation({
-    mutationFn: async (assignToAll: boolean) => {
-      if (!user) {
-        throw new Error("No hay una sesion activa para asignar tareas")
-      }
+  mutationFn: async (assignToAll: boolean) => {
+    if (!user) {
+      throw new Error("No hay una sesion activa para asignar tareas")
+    }
 
-      const createdAt = new Date().toISOString()
-      let inserts: TaskInsert[] = []
+    // 🔥 VALIDACIÓN QUÍMICOS
+    if (taskType === "quimicos" && !selectedChemical) {
+      throw new Error("Debes seleccionar un químico")
+    }
 
-      if (assignToAll) {
-        inserts = beds.map(bed => ({
+    const createdAt = new Date().toISOString()
+    let inserts: TaskInsert[] = []
+
+    if (assignToAll) {
+      inserts = beds.map(bed => ({
+        greenhouse_id: greenhouseId,
+        bed_id: bed.id,
+        task_type: taskType,
+        chemical_id: taskType === "quimicos" ? selectedChemical : null, // 🔥 NUEVO
+        assigned_by: user.id,
+        created_at: createdAt,
+        notes,
+        week_start: weekStart
+      }))
+    } else {
+      const manualInserts: TaskInsert[] = []
+
+      Array.from(selectedBeds).forEach(key => {
+        const bedId = bedMap.get(key)
+
+        if (!bedId) return
+
+        manualInserts.push({
           greenhouse_id: greenhouseId,
-          bed_id: bed.id,
+          bed_id: bedId,
           task_type: taskType,
+          chemical_id: taskType === "quimicos" ? selectedChemical : null, // 🔥 NUEVO
           assigned_by: user.id,
           created_at: createdAt,
           notes,
           week_start: weekStart
-        }))
-      } else {
-        const manualInserts: TaskInsert[] = []
-
-        Array.from(selectedBeds).forEach(key => {
-          const bedId = bedMap.get(key)
-
-          if (!bedId) return
-
-          manualInserts.push({
-            greenhouse_id: greenhouseId,
-            bed_id: bedId,
-            task_type: taskType,
-            assigned_by: user.id,
-            created_at: createdAt,
-            notes,
-            week_start: weekStart
-          })
         })
-
-        inserts = manualInserts
-      }
-
-      if (inserts.length === 0) {
-        throw new Error("No hay camas seleccionadas")
-      }
-
-      const { data, error } = await supabase
-        .from("tasks")
-        .insert(inserts)
-        .select("*")
-
-      if (error) throw error
-
-      return (data ?? []) as Task[]
-    },
-
-    onSuccess: insertedTasks => {
-      queryClient.setQueryData<Task[]>(["tasks", greenhouseId], current =>
-        mergeTasksById(current ?? [], insertedTasks)
-      )
-      queryClient.invalidateQueries({ queryKey: ["tasks", greenhouseId] })
-      setLastAssignedBatch({
-        ids: insertedTasks.map(task => task.id),
-        taskType,
-        createdAt: insertedTasks[0]?.created_at ?? new Date().toISOString(),
-        count: insertedTasks.length
       })
-      setSelectedBeds(new Set())
-      setMode("view")
-      setAssignDialogOpen(false)
-      setNotes("")
 
-      toast({ title: "Tarea asignada" })
-    },
-
-    onError: (error: Error) => {
-      console.error(error)
-      toast({
-        title: "Error",
-        description: error.message
-      })
+      inserts = manualInserts
     }
+
+    if (inserts.length === 0) {
+      throw new Error("No hay camas seleccionadas")
+    }
+
+    const { data, error } = await supabase
+      .from("tasks")
+      .insert(inserts)
+      .select("*")
+
+    if (error) throw error
+
+    return (data ?? []) as Task[]
+  },
+
+  onSuccess: insertedTasks => {
+    queryClient.setQueryData<Task[]>(["tasks", greenhouseId], current =>
+      mergeTasksById(current ?? [], insertedTasks)
+    )
+    queryClient.invalidateQueries({ queryKey: ["tasks", greenhouseId] })
+
+    setLastAssignedBatch({
+      ids: insertedTasks.map(task => task.id),
+      taskType,
+      createdAt: insertedTasks[0]?.created_at ?? new Date().toISOString(),
+      count: insertedTasks.length
+    })
+
+    setSelectedBeds(new Set())
+    setMode("view")
+    setAssignDialogOpen(false)
+    setNotes("")
+    setSelectedChemical(null) // 🔥 LIMPIAR
+
+    toast({ title: "Tarea asignada" })
+  },
+
+  onError: (error: Error) => {
+    console.error(error)
+    toast({
+      title: "Error",
+      description: error.message
+    })
+  }
+})
+const chemicalMap = useMemo(() => {
+  const map = new Map<string, string>()
+  chemicals.forEach(c => {
+    map.set(c.id, c.name)
   })
+  return map
+}, [chemicals])
 
   const undoAssignMutation = useMutation({
     mutationFn: async () => {
@@ -679,7 +716,7 @@ export default function GreenhouseMap({
 
       <div className="mb-4 grid gap-3 lg:grid-cols-[minmax(0,1fr)_18rem_12rem] lg:items-start">
         <div>
-          {lastAssignedBatch && (
+          {lastAssignedBatch && selectedBedDetail?.bedKey === "__hidden__" && (
             <div className="space-y-2 rounded border border-amber-200 bg-amber-50 p-3 text-sm lg:max-w-sm">
               <p className="font-medium">Ultima asignacion</p>
               <p>
@@ -760,7 +797,7 @@ export default function GreenhouseMap({
           ))}
 
 
-          {lastAssignedBatch && selectedBedDetail?.bedKey === "__hidden__" && (
+          {lastAssignedBatch && (
             <div className="space-y-2 rounded border border-amber-200 bg-amber-50 p-3 text-sm">
               <p className="font-medium">Ultima asignacion</p>
               <p>
@@ -931,43 +968,58 @@ export default function GreenhouseMap({
             </div>
           </div>
         </DialogContent>
-      </Dialog>
-
       <Dialog open={assignDialogOpen} onOpenChange={setAssignDialogOpen}>
-        <DialogContent>
-          <DialogHeader>
-            <DialogTitle>Asignar tarea</DialogTitle>
-          </DialogHeader>
+  <DialogContent>
+    <DialogHeader>
+      <DialogTitle>Asignar tarea</DialogTitle>
+    </DialogHeader>
 
-          <Textarea
-            placeholder="Notas..."
-            value={notes}
-            onChange={event => setNotes(event.target.value)}
-          />
+    <Textarea
+      placeholder="Notas..."
+      value={notes}
+      onChange={event => setNotes(event.target.value)}
+    />
 
-          <div className="mt-4 flex gap-2">
-            <Button
-              type="button"
-              onClick={() => assignMutation.mutate(true)}
-              disabled={assignMutation.isPending}
-            >
-              {assignMutation.isPending ? "Asignando..." : "Todas"}
-            </Button>
+    {/* 🔥 SELECTOR DE QUÍMICOS */}
+    {taskType === "quimicos" && (
+      <select
+        className="border p-2 rounded w-full mt-2"
+        value={selectedChemical ?? ""}
+        onChange={(e) => setSelectedChemical(e.target.value)}
+      >
+        <option value="">Selecciona químico</option>
 
-            <Button
-              type="button"
-              variant="outline"
-              disabled={assignMutation.isPending}
-              onClick={() => {
-                setMode("select")
-                setAssignDialogOpen(false)
-              }}
-            >
-              Manual
-            </Button>
-          </div>
-        </DialogContent>
-      </Dialog>
+        {chemicals.map(c => (
+          <option key={c.id} value={c.id}>
+            {c.name}
+          </option>
+        ))}
+      </select>
+    )}
+
+    <div className="mt-4 flex gap-2">
+      <Button
+        type="button"
+        onClick={() => assignMutation.mutate(true)}
+        disabled={assignMutation.isPending}
+      >
+        {assignMutation.isPending ? "Asignando..." : "Todas"}
+      </Button>
+
+      <Button
+        type="button"
+        variant="outline"
+        disabled={assignMutation.isPending}
+        onClick={() => {
+          setMode("select")
+          setAssignDialogOpen(false)
+        }}
+      >
+        Manual
+      </Button>
+    </div>
+  </DialogContent>
+</Dialog></Dialog>
 
       {mode === "select" && selectedBeds.size > 0 && (
         <div className="fixed bottom-6 right-6 z-50 rounded border bg-white p-4 shadow">
@@ -990,46 +1042,62 @@ export default function GreenhouseMap({
             </DialogTitle>
           </DialogHeader>
 
-          {selectedBedDetail?.tasks?.length ? (
-            selectedBedDetail.tasks.map(task => (
-              <div key={task.id} className="mb-2 space-y-1 rounded border p-3">
-                <p className="font-semibold capitalize">{taskLabels[task.task_type]}</p>
+         
+         {selectedBedDetail?.tasks?.length ? (
+  selectedBedDetail.tasks.map(task => (
+    <div key={task.id} className="mb-2 space-y-1 rounded border p-3">
 
-                <p className="text-sm text-gray-600">
-                  Creada: {formatDateTime(task.created_at)}
-                </p>
+      <p className="font-semibold capitalize">
+        {taskLabels[task.task_type]}
+      </p>
 
-                {task.notes && (
-                  <p className="text-sm italic text-gray-700">{task.notes}</p>
-                )}
+      {/* 🔥 QUÍMICO */}
+      {task.chemical_id && (
+        <p className="text-sm text-blue-600">
+          🧪 {chemicalMap.get(task.chemical_id) || "Químico"}
+        </p>
+      )}
 
-                {task.status === "completed" ? (
-                  <>
-                    <p className="font-semibold text-green-600">Completada</p>
-                    {task.completed_at && (
-                      <p className="text-xs text-gray-500">
-                        {formatDateTime(task.completed_at)}
-                      </p>
-                    )}
-                  </>
-                ) : (
-                  <Button
-                    type="button"
-                    size="sm"
-                    disabled={completeMutation.isPending}
-                    onClick={() => completeMutation.mutate(task.id)}
-                  >
-                    Marcar como hecha
-                  </Button>
-                )}
-              </div>
-            ))
-          ) : (
-            <p>Sin tareas</p>
+      <p className="text-sm text-gray-600">
+        Creada: {formatDateTime(task.created_at)}
+      </p>
+
+      {task.notes && (
+        <p className="text-sm italic text-gray-700">
+          {task.notes}
+        </p>
+      )}
+
+      {task.status === "completed" ? (
+        <>
+          <p className="font-semibold text-green-600">
+            Completada
+          </p>
+
+          {task.completed_at && (
+            <p className="text-xs text-gray-500">
+              {formatDateTime(task.completed_at)}
+            </p>
           )}
-        </DialogContent>
-      </Dialog>
+        </>
+      ) : (
+        <Button
+          type="button"
+          size="sm"
+          disabled={completeMutation.isPending}
+          onClick={() => completeMutation.mutate(task.id)}
+        >
+          Marcar como hecha
+        </Button>
+      )}
 
+    </div>
+  ))
+) : (
+  <p>Sin tareas</p>
+)}
+</DialogContent>
+</Dialog>
       <Dialog open={createTaskOpen} onOpenChange={setCreateTaskOpen}>
         <DialogContent>
           <DialogHeader>
