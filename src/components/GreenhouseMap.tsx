@@ -148,7 +148,7 @@ const buildBedTaskMap = (items: Task[]) => {
 
 const getTaskWeekStart = (task: Task) => {
   if (task.week_start) {
-    return getDateOnly(task.week_start)
+    return task.week_start.split("T")[0]
   }
 
   return getWeekStartDate(task.created_at)
@@ -209,6 +209,20 @@ export default function GreenhouseMap({
   const cellSize = Math.max(18, Math.min(45, (viewportWidth * 0.7) / columns))
   const middleRow = Math.floor(rows / 2)
   const weekStart = currentWeek.start_date.split("T")[0]
+const getWeekStatus = () => {
+  const today = new Date()
+
+  const todayStart = new Date(today)
+  todayStart.setHours(0, 0, 0, 0)
+  todayStart.setDate(today.getDate() - today.getDay()) // domingo actual
+
+  const selectedStart = new Date(currentWeek.start_date)
+  selectedStart.setHours(0, 0, 0, 0)
+
+  if (selectedStart < todayStart) return "past"
+  if (selectedStart > todayStart) return "future"
+  return "current"
+}
 
   const changeWeek = (direction: number) => {
     setAutoAdjustedWeek(true)
@@ -249,6 +263,31 @@ export default function GreenhouseMap({
       return (data ?? []) as Bed[]
     }
   })
+  const { data: currentWeekData } = useQuery({
+  queryKey: ["week", weekStart],
+  queryFn: async () => {
+    const { data, error } = await supabase
+      .from("weeks")
+      .select("*")
+      .eq("start_date", weekStart)
+      .maybeSingle()
+
+    if (error) {
+      console.error("Error week:", error)
+      return null
+    }
+
+    return data
+  }
+})
+const isLockedForAssign = () => {
+  const status = getWeekStatus()
+  return status === "past" || status === "current"
+}
+
+const canCompleteTasks = () => {
+  return getWeekStatus() === "current"
+}
 
   const { data: tasks = [] } = useQuery({
     queryKey: ["tasks", greenhouseId],
@@ -310,10 +349,12 @@ const { data: chemicals = [] } = useQuery({
     return map
   }, [beds])
 
-  const currentWeekTasks = useMemo(
-    () => tasks.filter(task => getTaskWeekStart(task) === weekStart),
-    [tasks, weekStart]
-  )
+  const currentWeekTasks = useMemo(() => {
+  return tasks.filter(task => {
+    const taskWeek = getTaskWeekStart(task)
+    return taskWeek === weekStart
+  })
+}, [tasks, weekStart])
   const currentWeekBedTaskMap = useMemo(
     () => buildBedTaskMap(currentWeekTasks),
     [currentWeekTasks]
@@ -471,9 +512,19 @@ const { data: chemicals = [] } = useQuery({
       throw new Error("No hay una sesion activa para asignar tareas")
     }
 
+    // 🔒 BLOQUEO POR SEMANA
+    if (isLockedForAssign()) {
+      throw new Error("Recuerda que la semana ya está planeada y no se pueden asignar más tareas")
+    }
+
     // 🔥 VALIDACIÓN QUÍMICOS
     if (taskType === "quimicos" && !selectedChemical) {
       throw new Error("Debes seleccionar un químico")
+    }
+
+    // 🔥 VALIDACIÓN MANUAL (IMPORTANTE)
+    if (!assignToAll && selectedBeds.size === 0) {
+      throw new Error("Selecciona al menos una cama")
     }
 
     const createdAt = new Date().toISOString()
@@ -484,37 +535,30 @@ const { data: chemicals = [] } = useQuery({
         greenhouse_id: greenhouseId,
         bed_id: bed.id,
         task_type: taskType,
-        chemical_id: taskType === "quimicos" ? selectedChemical : null, // 🔥 NUEVO
+        chemical_id: taskType === "quimicos" ? selectedChemical : null,
         assigned_by: user.id,
         created_at: createdAt,
         notes,
         week_start: weekStart
       }))
     } else {
-      const manualInserts: TaskInsert[] = []
+      inserts = Array.from(selectedBeds)
+        .map(key => {
+          const bedId = bedMap.get(key)
+          if (!bedId) return null
 
-      Array.from(selectedBeds).forEach(key => {
-        const bedId = bedMap.get(key)
-
-        if (!bedId) return
-
-        manualInserts.push({
-          greenhouse_id: greenhouseId,
-          bed_id: bedId,
-          task_type: taskType,
-          chemical_id: taskType === "quimicos" ? selectedChemical : null, // 🔥 NUEVO
-          assigned_by: user.id,
-          created_at: createdAt,
-          notes,
-          week_start: weekStart
+          return {
+            greenhouse_id: greenhouseId,
+            bed_id: bedId,
+            task_type: taskType,
+            chemical_id: taskType === "quimicos" ? selectedChemical : null,
+            assigned_by: user.id,
+            created_at: createdAt,
+            notes,
+            week_start: weekStart
+          }
         })
-      })
-
-      inserts = manualInserts
-    }
-
-    if (inserts.length === 0) {
-      throw new Error("No hay camas seleccionadas")
+        .filter(Boolean) as TaskInsert[]
     }
 
     const { data, error } = await supabase
@@ -524,27 +568,21 @@ const { data: chemicals = [] } = useQuery({
 
     if (error) throw error
 
-    return (data ?? []) as Task[]
+    return data as Task[]
   },
 
-  onSuccess: insertedTasks => {
+  onSuccess: (insertedTasks) => {
     queryClient.setQueryData<Task[]>(["tasks", greenhouseId], current =>
       mergeTasksById(current ?? [], insertedTasks)
     )
-    queryClient.invalidateQueries({ queryKey: ["tasks", greenhouseId] })
 
-    setLastAssignedBatch({
-      ids: insertedTasks.map(task => task.id),
-      taskType,
-      createdAt: insertedTasks[0]?.created_at ?? new Date().toISOString(),
-      count: insertedTasks.length
-    })
+    queryClient.invalidateQueries({ queryKey: ["tasks", greenhouseId] })
 
     setSelectedBeds(new Set())
     setMode("view")
     setAssignDialogOpen(false)
     setNotes("")
-    setSelectedChemical(null) // 🔥 LIMPIAR
+    setSelectedChemical(null)
 
     toast({ title: "Tarea asignada" })
   },
@@ -715,6 +753,11 @@ const chemicalMap = useMemo(() => {
       </div>
 
       <div className="mb-4 grid gap-3 lg:grid-cols-[minmax(0,1fr)_18rem_12rem] lg:items-start">
+        {isLockedForAssign() && (
+  <div className="mb-3 rounded border border-red-300 bg-red-50 p-2 text-sm text-red-700">
+    ⚠️ Recuerda que la semana ya está planeada y no se pueden asignar más tareas
+  </div>
+)}
         <div>
           {lastAssignedBatch && selectedBedDetail?.bedKey === "__hidden__" && (
             <div className="space-y-2 rounded border border-amber-200 bg-amber-50 p-3 text-sm lg:max-w-sm">
@@ -998,27 +1041,29 @@ const chemicalMap = useMemo(() => {
     )}
 
     <div className="mt-4 flex gap-2">
-      <Button
-        type="button"
-        onClick={() => assignMutation.mutate(true)}
-        disabled={assignMutation.isPending}
-      >
-        {assignMutation.isPending ? "Asignando..." : "Todas"}
-      </Button>
 
-      <Button
-        type="button"
-        variant="outline"
-        disabled={assignMutation.isPending}
-        onClick={() => {
-          setMode("select")
-          setAssignDialogOpen(false)
-        }}
-      >
-        Manual
-      </Button>
-    </div>
-  </DialogContent>
+  <Button
+  type="button"
+  onClick={() => assignMutation.mutate(true)}
+  disabled={assignMutation.isPending || isLockedForAssign()}
+>
+    {assignMutation.isPending ? "Asignando..." : "Todas"}
+  </Button>
+
+  <Button
+    type="button"
+    variant="outline"
+    disabled={assignMutation.isPending || isLockedForAssign()}
+    onClick={() => {
+      setMode("select")
+      setAssignDialogOpen(false)
+    }}
+  >
+    Manual
+  </Button>
+
+</div>
+</DialogContent>
 </Dialog></Dialog>
 
       {mode === "select" && selectedBeds.size > 0 && (
@@ -1027,7 +1072,7 @@ const chemicalMap = useMemo(() => {
           <Button
             type="button"
             onClick={() => assignMutation.mutate(false)}
-            disabled={assignMutation.isPending}
+disabled={assignMutation.isPending || selectedBeds.size === 0}
           >
             {assignMutation.isPending ? "Asignando..." : "Confirmar"}
           </Button>
@@ -1082,13 +1127,13 @@ const chemicalMap = useMemo(() => {
         </>
       ) : (
         <Button
-          type="button"
-          size="sm"
-          disabled={completeMutation.isPending}
-          onClick={() => completeMutation.mutate(task.id)}
-        >
-          Marcar como hecha
-        </Button>
+  type="button"
+  size="sm"
+  disabled={completeMutation.isPending || !canCompleteTasks()}
+  onClick={() => completeMutation.mutate(task.id)}
+>
+  Marcar como hecha
+</Button>
       )}
 
     </div>
