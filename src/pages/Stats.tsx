@@ -1,5 +1,5 @@
 import { Bar, BarChart, Cell, Legend, Pie, PieChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts';
-import { CheckCircle2, ClipboardCheck, Clock, Leaf } from 'lucide-react';
+import { CheckCircle2, ClipboardCheck, Clock, Leaf, XCircle } from 'lucide-react';
 import { useQuery } from '@tanstack/react-query';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { getSupabaseErrorMessage, supabase } from '@/lib/supabase';
@@ -9,7 +9,7 @@ const COLORS = ['hsl(35, 90%, 55%)', 'hsl(145, 63%, 32%)', 'hsl(200, 80%, 50%)',
 const taskLabels: Record<string, string> = {
   cortar: 'Cortar',
   fertilizar: 'Fertilizar',
-  quimicos: 'Químicos',
+  quimicos: 'Quimicos',
   poscosecha: 'Poscosecha',
 };
 
@@ -48,7 +48,8 @@ export default function Stats() {
 
   const total = tasks?.length ?? 0;
   const completed = tasks?.filter(task => task.status === 'completed').length ?? 0;
-  const pending = total - completed;
+  const pending = tasks?.filter(task => task.status === 'pending').length ?? 0;
+  const cancelled = tasks?.filter(task => task.status === 'cancelled').length ?? 0;
 
   const byType = Object.entries(taskLabels).map(([key, label]) => ({
     name: label,
@@ -69,18 +70,18 @@ export default function Stats() {
 
   return (
     <div className="space-y-6 animate-fade-in">
-      <h1 className="font-heading text-2xl font-bold">Estadísticas</h1>
+      <h1 className="font-heading text-2xl font-bold">Estadisticas</h1>
 
       {queryError && (
         <p className="text-sm text-destructive">
-          {getSupabaseErrorMessage(queryError, 'No fue posible cargar las estadísticas.')}
+          {getSupabaseErrorMessage(queryError, 'No fue posible cargar las estadisticas.')}
         </p>
       )}
 
-      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+      <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-5">
         <Card>
           <CardContent className="flex items-center gap-3 pt-6">
-            <ClipboardCheck className="w-8 h-8 text-primary" />
+            <ClipboardCheck className="h-8 w-8 text-primary" />
             <div>
               <p className="text-2xl font-heading font-bold">{total}</p>
               <p className="text-xs text-muted-foreground">Total tareas</p>
@@ -89,7 +90,7 @@ export default function Stats() {
         </Card>
         <Card>
           <CardContent className="flex items-center gap-3 pt-6">
-            <CheckCircle2 className="w-8 h-8 text-success" />
+            <CheckCircle2 className="h-8 w-8 text-success" />
             <div>
               <p className="text-2xl font-heading font-bold">{completed}</p>
               <p className="text-xs text-muted-foreground">Completadas</p>
@@ -98,7 +99,7 @@ export default function Stats() {
         </Card>
         <Card>
           <CardContent className="flex items-center gap-3 pt-6">
-            <Clock className="w-8 h-8 text-warning" />
+            <Clock className="h-8 w-8 text-warning" />
             <div>
               <p className="text-2xl font-heading font-bold">{pending}</p>
               <p className="text-xs text-muted-foreground">Pendientes</p>
@@ -107,7 +108,16 @@ export default function Stats() {
         </Card>
         <Card>
           <CardContent className="flex items-center gap-3 pt-6">
-            <Leaf className="w-8 h-8 text-primary" />
+            <XCircle className="h-8 w-8 text-destructive" />
+            <div>
+              <p className="text-2xl font-heading font-bold">{cancelled}</p>
+              <p className="text-xs text-muted-foreground">Canceladas</p>
+            </div>
+          </CardContent>
+        </Card>
+        <Card>
+          <CardContent className="flex items-center gap-3 pt-6">
+            <Leaf className="h-8 w-8 text-primary" />
             <div>
               <p className="text-2xl font-heading font-bold">{greenhouses?.length ?? 0}</p>
               <p className="text-xs text-muted-foreground">Invernaderos</p>
@@ -136,7 +146,7 @@ export default function Stats() {
 
         <Card>
           <CardHeader>
-            <CardTitle className="font-heading text-base">Distribución por tipo</CardTitle>
+            <CardTitle className="font-heading text-base">Distribucion por tipo</CardTitle>
           </CardHeader>
           <CardContent>
             <ResponsiveContainer width="100%" height={250}>

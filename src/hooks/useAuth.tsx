@@ -1,6 +1,6 @@
 import { createContext, useCallback, useContext, useEffect, useState, type ReactNode } from 'react';
 import { type Session, type User } from '@supabase/supabase-js';
-import type { Enums } from '@/lib/database.types';
+import type { Enums } from '@/types/supabase';
 import { getSupabaseErrorMessage, supabase } from '@/lib/supabase';
 
 type AppRole = Enums<'app_role'>;

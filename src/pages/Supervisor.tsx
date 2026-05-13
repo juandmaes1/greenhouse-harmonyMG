@@ -4,13 +4,13 @@ import { Button } from '@/components/ui/button';
 import { Card, CardContent } from '@/components/ui/card';
 import { useAuth } from '@/hooks/useAuth';
 import { useToast } from '@/hooks/use-toast';
-import { getSupabaseErrorMessage, supabase} from '@/lib/supabase';
+import { getSupabaseErrorMessage, supabase } from '@/lib/supabase';
 import { cn } from '@/lib/utils';
 
 const taskLabels: Record<string, string> = {
   cortar: 'Cortar',
   fertilizar: 'Fertilizar',
-  quimicos: 'Químicos',
+  quimicos: 'Quimicos',
   poscosecha: 'Poscosecha',
 };
 
@@ -49,7 +49,7 @@ export default function SupervisorPage() {
   const completeMutation = useMutation({
     mutationFn: async (taskId: string) => {
       if (!user) {
-        throw new Error('No hay una sesión activa para completar tareas.');
+        throw new Error('No hay una sesion activa para completar tareas.');
       }
 
       const { error } = await supabase
@@ -67,6 +67,8 @@ export default function SupervisorPage() {
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['pending-tasks'] });
+      queryClient.invalidateQueries({ queryKey: ['tasks'] });
+      queryClient.invalidateQueries({ queryKey: ['all-tasks-stats'] });
       toast({ title: 'Tarea completada' });
     },
     onError: mutationError =>
@@ -88,9 +90,9 @@ export default function SupervisorPage() {
       )}
 
       {tasks?.length === 0 && !error && (
-        <div className="text-center py-12">
-          <CheckCircle2 className="w-12 h-12 text-primary mx-auto mb-3" />
-          <p className="text-muted-foreground">¡No hay tareas pendientes!</p>
+        <div className="py-12 text-center">
+          <CheckCircle2 className="mx-auto mb-3 h-12 w-12 text-primary" />
+          <p className="text-muted-foreground">No hay tareas pendientes.</p>
         </div>
       )}
 
@@ -99,10 +101,19 @@ export default function SupervisorPage() {
           <Card key={task.id} className={cn('border-l-4', taskColors[task.task_type])}>
             <CardContent className="flex items-center justify-between py-4">
               <div className="space-y-1">
-                <div className="flex items-center gap-2">
-                  <Leaf className="w-4 h-4 text-primary" />
-                  <span className="font-medium text-sm">{(task.greenhouses as { name?: string } | null)?.name}</span>
-                  <span className="text-xs bg-muted px-2 py-0.5 rounded">{taskLabels[task.task_type]}</span>
+                <div className="flex flex-wrap items-center gap-2">
+                  <Leaf className="h-4 w-4 text-primary" />
+                  <span className="text-sm font-medium">
+                    {(task.greenhouses as { name?: string } | null)?.name}
+                  </span>
+                  <span className="rounded bg-muted px-2 py-0.5 text-xs">
+                    {task.task_name || taskLabels[task.task_type]}
+                  </span>
+                  {task.is_unplanned && (
+                    <span className="rounded bg-orange-100 px-2 py-0.5 text-xs text-orange-700">
+                      Imprevisto
+                    </span>
+                  )}
                 </div>
                 <p className="text-xs text-muted-foreground">
                   {task.is_general
@@ -111,7 +122,7 @@ export default function SupervisorPage() {
                   {(task.chemicals as { name?: string } | null)?.name &&
                     ` · ${(task.chemicals as { name?: string } | null)?.name}`}
                 </p>
-                {task.notes && <p className="text-xs text-muted-foreground italic">{task.notes}</p>}
+                {task.notes && <p className="text-xs italic text-muted-foreground">{task.notes}</p>}
               </div>
               <Button
                 size="sm"
@@ -119,7 +130,7 @@ export default function SupervisorPage() {
                 disabled={completeMutation.isPending}
                 className="gap-1"
               >
-                <CheckCircle2 className="w-4 h-4" /> Completar
+                <CheckCircle2 className="h-4 w-4" /> Completar
               </Button>
             </CardContent>
           </Card>

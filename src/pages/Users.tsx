@@ -9,8 +9,9 @@ import { getSupabaseErrorMessage, supabase } from '@/lib/supabase';
 
 const roleLabels = {
   admin: 'Administrador',
-  engineer: 'Ingeniero',
+  engineer: 'Jefe de area',
   supervisor: 'Supervisor',
+  consultant: 'Consultor',
 };
 
 export default function UsersPage() {
@@ -62,7 +63,7 @@ export default function UsersPage() {
 
       const { error } = await supabase.from('user_roles').insert({
         user_id: userId,
-        role: role as 'admin' | 'engineer' | 'supervisor',
+        role: role as 'admin' | 'engineer' | 'supervisor' | 'consultant',
       });
 
       if (error) {
@@ -158,8 +159,9 @@ export default function UsersPage() {
                   </SelectTrigger>
                   <SelectContent>
                     <SelectItem value="admin">Administrador</SelectItem>
-                    <SelectItem value="engineer">Ingeniero</SelectItem>
+                    <SelectItem value="engineer">Jefe de area</SelectItem>
                     <SelectItem value="supervisor">Supervisor</SelectItem>
+                    <SelectItem value="consultant">Consultor</SelectItem>
                   </SelectContent>
                 </Select>
               </CardContent>

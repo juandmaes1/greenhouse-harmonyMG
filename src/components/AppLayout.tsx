@@ -7,8 +7,9 @@ import { cn } from '@/lib/utils';
 
 const roleLabels = {
   admin: 'Administrador',
-  engineer: 'Ingeniero',
+  engineer: 'Jefe de area',
   supervisor: 'Supervisor',
+  consultant: 'Consultor',
 };
 
 export default function AppLayout({ children }: { children: ReactNode }) {
@@ -16,7 +17,7 @@ export default function AppLayout({ children }: { children: ReactNode }) {
   const location = useLocation();
 
   const navItems = [
-    { to: '/', label: 'Invernaderos', icon: Home, roles: ['admin', 'engineer', 'supervisor'] },
+    { to: '/', label: 'Invernaderos', icon: Home, roles: ['admin', 'engineer', 'supervisor', 'consultant'] },
     { to: '/chemicals', label: 'Químicos', icon: FlaskConical, roles: ['admin'] },
     { to: '/users', label: 'Usuarios', icon: Users, roles: ['admin'] },
     { to: '/stats', label: 'Estadísticas', icon: BarChart3, roles: ['admin'] },
