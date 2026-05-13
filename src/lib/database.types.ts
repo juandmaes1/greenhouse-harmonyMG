@@ -121,10 +121,54 @@ export type Database = {
         }
         Relationships: []
       }
+      task_definitions: {
+        Row: {
+          created_at: string
+          end_week: string | null
+          greenhouse_id: string | null
+          id: string
+          is_permanent: boolean
+          name: string
+          start_week: string | null
+          task_type: Database["public"]["Enums"]["task_type"]
+        }
+        Insert: {
+          created_at?: string
+          end_week?: string | null
+          greenhouse_id?: string | null
+          id?: string
+          is_permanent?: boolean
+          name: string
+          start_week?: string | null
+          task_type: Database["public"]["Enums"]["task_type"]
+        }
+        Update: {
+          created_at?: string
+          end_week?: string | null
+          greenhouse_id?: string | null
+          id?: string
+          is_permanent?: boolean
+          name?: string
+          start_week?: string | null
+          task_type?: Database["public"]["Enums"]["task_type"]
+        }
+        Relationships: [
+          {
+            foreignKeyName: "task_definitions_greenhouse_id_fkey"
+            columns: ["greenhouse_id"]
+            isOneToOne: false
+            referencedRelation: "greenhouses"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       tasks: {
         Row: {
           assigned_by: string
           bed_id: string | null
+          cancelled_at: string | null
+          cancelled_by: string | null
+          cancelled_reason: string | null
           chemical_id: string | null
           completed_at: string | null
           completed_by: string | null
@@ -132,13 +176,21 @@ export type Database = {
           greenhouse_id: string
           id: string
           is_general: boolean
+          is_unplanned: boolean
           notes: string | null
           status: Database["public"]["Enums"]["task_status"]
+          task_definition_id: string | null
+          task_name: string | null
           task_type: Database["public"]["Enums"]["task_type"]
+          week_id: string | null
+          week_start: string | null
         }
         Insert: {
           assigned_by: string
           bed_id?: string | null
+          cancelled_at?: string | null
+          cancelled_by?: string | null
+          cancelled_reason?: string | null
           chemical_id?: string | null
           completed_at?: string | null
           completed_by?: string | null
@@ -146,13 +198,21 @@ export type Database = {
           greenhouse_id: string
           id?: string
           is_general?: boolean
+          is_unplanned?: boolean
           notes?: string | null
           status?: Database["public"]["Enums"]["task_status"]
+          task_definition_id?: string | null
+          task_name?: string | null
           task_type: Database["public"]["Enums"]["task_type"]
+          week_id?: string | null
+          week_start?: string | null
         }
         Update: {
           assigned_by?: string
           bed_id?: string | null
+          cancelled_at?: string | null
+          cancelled_by?: string | null
+          cancelled_reason?: string | null
           chemical_id?: string | null
           completed_at?: string | null
           completed_by?: string | null
@@ -160,9 +220,14 @@ export type Database = {
           greenhouse_id?: string
           id?: string
           is_general?: boolean
+          is_unplanned?: boolean
           notes?: string | null
           status?: Database["public"]["Enums"]["task_status"]
+          task_definition_id?: string | null
+          task_name?: string | null
           task_type?: Database["public"]["Enums"]["task_type"]
+          week_id?: string | null
+          week_start?: string | null
         }
         Relationships: [
           {
@@ -187,6 +252,30 @@ export type Database = {
             referencedColumns: ["id"]
           },
         ]
+      }
+      weeks: {
+        Row: {
+          created_at: string
+          end_date: string
+          id: string
+          is_locked: boolean
+          start_date: string
+        }
+        Insert: {
+          created_at?: string
+          end_date: string
+          id?: string
+          is_locked?: boolean
+          start_date: string
+        }
+        Update: {
+          created_at?: string
+          end_date?: string
+          id?: string
+          is_locked?: boolean
+          start_date?: string
+        }
+        Relationships: []
       }
       user_roles: {
         Row: {
@@ -223,8 +312,8 @@ export type Database = {
       }
     }
     Enums: {
-      app_role: "admin" | "engineer" | "supervisor"
-      task_status: "pending" | "completed"
+      app_role: "admin" | "engineer" | "supervisor" | "consultant"
+      task_status: "pending" | "completed" | "cancelled"
       task_type: "cortar" | "fertilizar" | "quimicos" | "poscosecha"
     }
     CompositeTypes: {
@@ -353,8 +442,8 @@ export type CompositeTypes<
 export const Constants = {
   public: {
     Enums: {
-      app_role: ["admin", "engineer", "supervisor"],
-      task_status: ["pending", "completed"],
+      app_role: ["admin", "engineer", "supervisor", "consultant"],
+      task_status: ["pending", "completed", "cancelled"],
       task_type: ["cortar", "fertilizar", "quimicos", "poscosecha"],
     },
   },

@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useMemo, useState } from 'react';
 import { ArrowLeft, Leaf, Plus, Settings } from 'lucide-react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import GreenhouseMap from '@/components/GreenhouseMap';
@@ -21,6 +21,40 @@ export default function Greenhouses() {
   const [rows, setRows] = useState(50);
   const [columns, setColumns] = useState(50);
   const [editId, setEditId] = useState('');
+
+  const currentWeekStart = useMemo(() => {
+    const today = new Date()
+    const start = new Date(today)
+    start.setDate(today.getDate() - today.getDay())
+    start.setHours(0, 0, 0, 0)
+    return start.toISOString().split('T')[0]
+  }, [])
+
+  const { data: weekTasks = [] } = useQuery({
+    queryKey: ['week-summary-tasks', currentWeekStart],
+    queryFn: async () => {
+      const { data, error } = await supabase
+        .from('tasks')
+        .select('greenhouse_id, status, is_unplanned')
+        .eq('week_start', currentWeekStart)
+      if (error) return []
+      return data ?? []
+    },
+  })
+
+  const ghSummary = useMemo(() => {
+    const map = new Map<string, { completed: number; pending: number; total: number; unplanned: number }>()
+    weekTasks.forEach(task => {
+      if (!task.greenhouse_id) return
+      const cur = map.get(task.greenhouse_id) ?? { completed: 0, pending: 0, total: 0, unplanned: 0 }
+      cur.total++
+      if (task.status === 'completed') cur.completed++
+      if (task.status === 'pending') cur.pending++
+      if (task.is_unplanned) cur.unplanned++
+      map.set(task.greenhouse_id, cur)
+    })
+    return map
+  }, [weekTasks])
 
   const {
     data: greenhouses,
@@ -191,25 +225,49 @@ export default function Greenhouses() {
         <p className="text-muted-foreground">Cargando...</p>
       ) : (
         <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-          {greenhouses?.map(greenhouse => (
-            <Card
-              key={greenhouse.id}
-              className="cursor-pointer hover:shadow-md transition-shadow"
-              onClick={() => setSelectedGH(greenhouse.id)}
-            >
-              <CardHeader className="flex flex-row items-center gap-3 pb-2">
-                <div className="w-10 h-10 rounded-xl bg-primary/10 flex items-center justify-center">
-                  <Leaf className="w-5 h-5 text-primary" />
-                </div>
-                <CardTitle className="font-heading text-lg">{greenhouse.name}</CardTitle>
-              </CardHeader>
-              <CardContent>
-                <p className="text-sm text-muted-foreground">
-                  {greenhouse.rows} × {greenhouse.columns} camas
-                </p>
-              </CardContent>
-            </Card>
-          ))}
+          {greenhouses?.map(greenhouse => {
+            const summary = ghSummary.get(greenhouse.id)
+            return (
+              <Card
+                key={greenhouse.id}
+                className="relative cursor-pointer transition-shadow hover:shadow-md"
+                onClick={() => setSelectedGH(greenhouse.id)}
+              >
+                {summary && summary.total > 0 && (
+                  <div className="absolute right-3 top-3 flex flex-col items-end gap-1">
+                    <div className="flex items-center gap-1 rounded-md border bg-white/95 px-2 py-1 text-xs shadow-sm">
+                      <span className="font-medium text-green-600">{summary.completed} ✓</span>
+                      <span className="text-muted-foreground">/ {summary.total}</span>
+                    </div>
+                    {summary.pending > 0 && (
+                      <div className="rounded-md border bg-yellow-50 px-2 py-0.5 text-xs text-yellow-700">
+                        {summary.pending} pendientes
+                      </div>
+                    )}
+                    {summary.unplanned > 0 && (
+                      <div className="rounded-md border border-orange-200 bg-orange-50 px-2 py-0.5 text-xs text-orange-700">
+                        {summary.unplanned} imprevistos
+                      </div>
+                    )}
+                  </div>
+                )}
+                <CardHeader className="flex flex-row items-center gap-3 pb-2">
+                  <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-primary/10">
+                    <Leaf className="h-5 w-5 text-primary" />
+                  </div>
+                  <CardTitle className="font-heading text-lg">{greenhouse.name}</CardTitle>
+                </CardHeader>
+                <CardContent>
+                  <p className="text-sm text-muted-foreground">
+                    {greenhouse.rows} × {greenhouse.columns} camas
+                  </p>
+                  {!summary || summary.total === 0 ? (
+                    <p className="mt-1 text-xs text-muted-foreground">Sin tareas esta semana</p>
+                  ) : null}
+                </CardContent>
+              </Card>
+            )
+          })}
           {greenhouses?.length === 0 && (
             <p className="text-muted-foreground col-span-full text-center py-12">
               No hay invernaderos creados aún.

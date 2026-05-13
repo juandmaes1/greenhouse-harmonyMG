@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react"
-import { Filter, Lock, TriangleAlert, X } from "lucide-react"
+import { Check, Filter, Lock, Trash2, TriangleAlert, X } from "lucide-react"
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
@@ -277,6 +277,7 @@ export default function GreenhouseMap({
   const [lastAssignedBatch, setLastAssignedBatch] = useState<LastAssignedBatch | null>(null)
   const [completionDraft, setCompletionDraft] = useState<CompletionDraft | null>(null)
   const [cancellationDraft, setCancellationDraft] = useState<CancellationDraft | null>(null)
+  const [deleteTaskDefinitionId, setDeleteTaskDefinitionId] = useState<string | null>(null)
 
   const viewportWidth = typeof window === "undefined" ? 1024 : window.innerWidth
   const cellSize = Math.max(18, Math.min(45, (viewportWidth * 0.7) / columns))
@@ -322,6 +323,7 @@ export default function GreenhouseMap({
         .from("beds")
         .select("*")
         .eq("greenhouse_id", greenhouseId)
+        .limit(20000)
 
       if (error) {
         console.error("Error beds:", error)
@@ -358,6 +360,7 @@ export default function GreenhouseMap({
         .select("*")
         .eq("greenhouse_id", greenhouseId)
         .order("created_at", { ascending: false })
+        .limit(100000)
 
       if (error) {
         console.error("Error tasks:", error)
@@ -429,6 +432,25 @@ export default function GreenhouseMap({
     })
     return map
   }, [chemicals])
+
+  const { data: profiles = [] } = useQuery({
+    queryKey: ["profiles"],
+    queryFn: async () => {
+      const { data, error } = await supabase
+        .from("profiles")
+        .select("user_id, full_name")
+      if (error) return []
+      return data ?? []
+    }
+  })
+
+  const profileMap = useMemo(() => {
+    const map = new Map<string, string>()
+    profiles.forEach(p => {
+      if (p.user_id) map.set(p.user_id, p.full_name ?? "Usuario")
+    })
+    return map
+  }, [profiles])
 
   const availableTaskDefinitions = useMemo(
     () =>
@@ -637,19 +659,15 @@ export default function GreenhouseMap({
 
     if (nonCancelled.length === 0) return "bg-slate-300"
 
-    if (
-      nonCancelled.some(
-        task => task.is_unplanned && task.status !== "completed"
-      )
-    ) {
-      return "bg-orange-400"
-    }
-
     if (nonCancelled.every(task => task.status === "completed")) {
-      return "bg-green-400"
+      return "bg-green-500"
     }
 
-    return "bg-yellow-300"
+    if (nonCancelled.some(task => task.is_unplanned && task.status !== "completed")) {
+      return "bg-red-500"
+    }
+
+    return "bg-orange-400"
   }
 
   const openFiltersModal = () => {
@@ -786,13 +804,8 @@ export default function GreenhouseMap({
           assignmentMode === "planned" ? isExplicitlyLocked : true
         )
       } catch (error) {
-        if (!isMissingDatabaseFeatureError(error)) {
-          throw error
-        }
-
-        if (assignmentMode === "unplanned") {
-          throw new Error(getMigrationErrorMessage("los imprevistos"))
-        }
+        // Week record is supplementary — never block task assignment because of it
+        console.warn("Week record skipped:", error)
       }
 
       const createdAt = new Date().toISOString()
@@ -831,26 +844,35 @@ export default function GreenhouseMap({
           .filter(Boolean) as TaskInsert[]
       }
 
-      const insertTasks = async (payload: TaskInsert[]) => {
-        const { data, error } = await supabase
-          .from("tasks")
-          .insert(payload)
-          .select("*")
+      const insertTasksBatched = async (payload: TaskInsert[]): Promise<number> => {
+        const BATCH = 200
+        const TIMEOUT_MS = 15000
 
-        if (error) throw error
+        for (let i = 0; i < payload.length; i += BATCH) {
+          const batch = payload.slice(i, i + BATCH)
 
-        return data as Task[]
+          const batchPromise = supabase.from("tasks").insert(batch).then(({ error }) => {
+            if (error) throw error
+          })
+
+          const timeoutPromise = new Promise<never>((_, reject) =>
+            setTimeout(
+              () => reject(new Error("La conexion tardo demasiado. Verifica tu internet e intenta de nuevo.")),
+              TIMEOUT_MS
+            )
+          )
+
+          await Promise.race([batchPromise, timeoutPromise])
+        }
+
+        return payload.length
       }
 
       try {
-        return await insertTasks(inserts)
+        return await insertTasksBatched(inserts)
       } catch (error) {
         if (!isMissingDatabaseFeatureError(error)) {
           throw error
-        }
-
-        if (assignmentMode === "unplanned") {
-          throw new Error(getMigrationErrorMessage("los imprevistos"))
         }
 
         const legacyInserts = inserts.map(insert => ({
@@ -859,24 +881,24 @@ export default function GreenhouseMap({
           chemical_id: insert.chemical_id,
           created_at: insert.created_at,
           greenhouse_id: insert.greenhouse_id,
+          is_unplanned: insert.is_unplanned,
           notes: insert.notes,
-          task_type: insert.task_type
+          task_type: insert.task_type,
+          week_id: insert.week_id,
+          week_start: insert.week_start
         }))
 
-        return await insertTasks(legacyInserts)
+        return await insertTasksBatched(legacyInserts)
       }
     },
-    onSuccess: insertedTasks => {
-      queryClient.setQueryData<Task[]>(["tasks", greenhouseId], current =>
-        mergeTasksById(current ?? [], insertedTasks)
-      )
-      queryClient.invalidateQueries({ queryKey: ["tasks", greenhouseId] })
+    onSuccess: (count: number) => {
+      queryClient.refetchQueries({ queryKey: ["tasks", greenhouseId] })
       queryClient.invalidateQueries({ queryKey: ["week", weekStart] })
       queryClient.invalidateQueries({ queryKey: ["pending-tasks"] })
       queryClient.invalidateQueries({ queryKey: ["all-tasks-stats"] })
 
       setLastAssignedBatch({
-        count: insertedTasks.length,
+        count,
         createdAt: new Date().toISOString(),
         mode: assignmentMode,
         taskName
@@ -1030,6 +1052,30 @@ export default function GreenhouseMap({
         title: "Error",
         description: error.message
       })
+    }
+  })
+
+  const deleteTaskDefinitionMutation = useMutation({
+    mutationFn: async (id: string) => {
+      if (!canCreateTaskDefinitions) {
+        throw new Error("Solo el jefe de area o el administrador pueden eliminar tareas.")
+      }
+
+      const { error } = await supabase
+        .from("task_definitions")
+        .delete()
+        .eq("id", id)
+
+      if (error) throw error
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["task-definitions", greenhouseId] })
+      setDeleteTaskDefinitionId(null)
+      toast({ title: "Tarea eliminada del panel" })
+    },
+    onError: (error: Error) => {
+      console.error(error)
+      toast({ title: "Error", description: error.message })
     }
   })
 
@@ -1236,21 +1282,35 @@ export default function GreenhouseMap({
               ))}
 
               {availableTaskDefinitions.map(taskDefinition => (
-                <button
-                  key={`planned-definition-${taskDefinition.id}`}
-                  type="button"
-                  onClick={() =>
-                    openAssignDialog({
-                      mode: "planned",
-                      taskDefinitionId: taskDefinition.id,
-                      taskName: taskDefinition.name,
-                      taskType: taskDefinition.task_type
-                    })
-                  }
-                  className="w-full rounded border bg-slate-50 px-3 py-2 text-left text-sm transition-colors hover:bg-slate-100"
-                >
-                  {taskDefinition.name}
-                </button>
+                <div key={`planned-definition-${taskDefinition.id}`} className="flex items-center gap-1">
+                  <button
+                    type="button"
+                    onClick={() =>
+                      openAssignDialog({
+                        mode: "planned",
+                        taskDefinitionId: taskDefinition.id,
+                        taskName: taskDefinition.name,
+                        taskType: taskDefinition.task_type
+                      })
+                    }
+                    className="flex flex-1 items-center justify-between gap-2 rounded border bg-slate-50 px-3 py-2 text-left text-sm transition-colors hover:bg-slate-100"
+                  >
+                    <span>{taskDefinition.name}</span>
+                    {!taskDefinition.is_permanent && (
+                      <Badge variant="secondary" className="shrink-0 text-xs">Temporal</Badge>
+                    )}
+                  </button>
+                  {canCreateTaskDefinitions && (
+                    <button
+                      type="button"
+                      title="Eliminar del panel"
+                      onClick={() => setDeleteTaskDefinitionId(taskDefinition.id)}
+                      className="rounded border p-2 text-muted-foreground transition-colors hover:bg-red-50 hover:text-red-600"
+                    >
+                      <Trash2 className="h-3.5 w-3.5" />
+                    </button>
+                  )}
+                </div>
               ))}
             </div>
           )}
@@ -1279,21 +1339,35 @@ export default function GreenhouseMap({
               ))}
 
               {availableTaskDefinitions.map(taskDefinition => (
-                <button
-                  key={`unplanned-definition-${taskDefinition.id}`}
-                  type="button"
-                  onClick={() =>
-                    openAssignDialog({
-                      mode: "unplanned",
-                      taskDefinitionId: taskDefinition.id,
-                      taskName: taskDefinition.name,
-                      taskType: taskDefinition.task_type
-                    })
-                  }
-                  className="w-full rounded border border-orange-200 bg-white px-3 py-2 text-left text-sm transition-colors hover:bg-orange-100"
-                >
-                  {taskDefinition.name}
-                </button>
+                <div key={`unplanned-definition-${taskDefinition.id}`} className="flex items-center gap-1">
+                  <button
+                    type="button"
+                    onClick={() =>
+                      openAssignDialog({
+                        mode: "unplanned",
+                        taskDefinitionId: taskDefinition.id,
+                        taskName: taskDefinition.name,
+                        taskType: taskDefinition.task_type
+                      })
+                    }
+                    className="flex flex-1 items-center justify-between gap-2 rounded border border-orange-200 bg-white px-3 py-2 text-left text-sm transition-colors hover:bg-orange-100"
+                  >
+                    <span>{taskDefinition.name}</span>
+                    {!taskDefinition.is_permanent && (
+                      <Badge variant="secondary" className="shrink-0 text-xs">Temporal</Badge>
+                    )}
+                  </button>
+                  {canCreateTaskDefinitions && (
+                    <button
+                      type="button"
+                      title="Eliminar del panel"
+                      onClick={() => setDeleteTaskDefinitionId(taskDefinition.id)}
+                      className="rounded border border-orange-200 p-2 text-muted-foreground transition-colors hover:bg-red-50 hover:text-red-600"
+                    >
+                      <Trash2 className="h-3.5 w-3.5" />
+                    </button>
+                  )}
+                </div>
               ))}
             </div>
           )}
@@ -1355,16 +1429,16 @@ export default function GreenhouseMap({
                 Sin tareas
               </div>
               <div className="flex items-center gap-2">
-                <span className="h-4 w-4 rounded border bg-yellow-300" />
-                Planeadas pendientes
-              </div>
-              <div className="flex items-center gap-2">
-                <span className="h-4 w-4 rounded border bg-green-400" />
-                Tareas cerradas
-              </div>
-              <div className="flex items-center gap-2">
                 <span className="h-4 w-4 rounded border bg-orange-400" />
-                Imprevistos
+                Tarea pendiente
+              </div>
+              <div className="flex items-center gap-2">
+                <span className="h-4 w-4 rounded border bg-red-500" />
+                Imprevisto pendiente
+              </div>
+              <div className="flex items-center gap-2">
+                <span className="h-4 w-4 rounded border bg-green-500" />
+                Ejecutada
               </div>
               <div className="flex items-center gap-2">
                 <span className="h-4 w-4 rounded border bg-slate-300" />
@@ -1400,7 +1474,7 @@ export default function GreenhouseMap({
                       key={key}
                       type="button"
                       disabled={hiddenByFilter}
-                      onDoubleClick={() => {
+                      onClick={() => {
                         if (mode === "view") {
                           openBedDetail(key)
                         }
@@ -1644,6 +1718,11 @@ export default function GreenhouseMap({
             selectedBedDetail.tasks.map(task => (
               <div key={task.id} className="space-y-2 rounded border p-3">
                 <div className="flex flex-wrap items-center gap-2">
+                  {task.status === "completed" && (
+                    <span className="flex h-5 w-5 items-center justify-center rounded-full bg-green-500 text-white">
+                      <Check className="h-3 w-3" />
+                    </span>
+                  )}
                   <p className="font-semibold">{getTaskDisplayName(task)}</p>
                   <Badge variant="outline">{taskLabels[task.task_type]}</Badge>
                   <Badge
@@ -1670,23 +1749,36 @@ export default function GreenhouseMap({
                   </p>
                 )}
 
-                <p className="text-sm text-gray-600">
-                  Creada: {formatDateTime(task.created_at)}
-                </p>
-
                 {task.notes && (
                   <p className="text-sm italic text-gray-700">{task.notes}</p>
                 )}
 
+                <p className="text-sm text-gray-500">
+                  Creada: {formatDateTime(task.created_at)}
+                  {task.assigned_by && profileMap.get(task.assigned_by) && (
+                    <> · por {profileMap.get(task.assigned_by)}</>
+                  )}
+                </p>
+
                 {task.status === "completed" && task.completed_at && (
                   <p className="text-sm text-green-700">
-                    Cerrada: {formatDateTime(task.completed_at)}
+                    Ejecutada: {formatDateTime(task.completed_at)}
+                    {task.completed_by && profileMap.get(task.completed_by) && (
+                      <> · por {profileMap.get(task.completed_by)}</>
+                    )}
                   </p>
                 )}
 
                 {task.status === "cancelled" && (
                   <div className="text-sm text-slate-600">
-                    {task.cancelled_at && <p>Cancelada: {formatDateTime(task.cancelled_at)}</p>}
+                    {task.cancelled_at && (
+                      <p>
+                        Cancelada: {formatDateTime(task.cancelled_at)}
+                        {task.cancelled_by && profileMap.get(task.cancelled_by) && (
+                          <> · por {profileMap.get(task.cancelled_by)}</>
+                        )}
+                      </p>
+                    )}
                     {task.cancelled_reason && <p>Motivo: {task.cancelled_reason}</p>}
                   </div>
                 )}
@@ -1697,6 +1789,7 @@ export default function GreenhouseMap({
                       <Button
                         type="button"
                         size="sm"
+                        className="gap-1.5"
                         disabled={completeMutation.isPending}
                         onClick={() =>
                           setCompletionDraft({
@@ -1706,7 +1799,8 @@ export default function GreenhouseMap({
                           })
                         }
                       >
-                        Cerrar tarea
+                        <Check className="h-3.5 w-3.5" />
+                        Marcar ejecutada
                       </Button>
                     )}
 
@@ -1744,43 +1838,73 @@ export default function GreenhouseMap({
       >
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>Cerrar tarea</DialogTitle>
+            <DialogTitle>¿Dar por terminada esta tarea?</DialogTitle>
           </DialogHeader>
 
           {completionDraft && (
-            <div className="space-y-4">
-              <p className="text-sm">
-                Vas a cerrar <span className="font-medium">{getTaskDisplayName(completionDraft.task)}</span>.
-              </p>
+            <div className="space-y-5">
+              <div className="rounded border bg-muted/40 p-3">
+                <p className="font-medium">{getTaskDisplayName(completionDraft.task)}</p>
+                <p className="text-sm text-muted-foreground">
+                  {taskLabels[completionDraft.task.task_type]}
+                  {completionDraft.task.is_unplanned && " · Imprevisto"}
+                </p>
+              </div>
 
-              <div className="grid gap-2">
-                <Button
-                  type="button"
-                  variant={completionDraft.useCurrentTime ? "default" : "outline"}
-                  onClick={() =>
-                    setCompletionDraft(prev =>
-                      prev ? { ...prev, useCurrentTime: true } : prev
-                    )
-                  }
-                >
-                  Usar fecha y hora actual
-                </Button>
-                <Button
-                  type="button"
-                  variant={!completionDraft.useCurrentTime ? "default" : "outline"}
-                  onClick={() =>
-                    setCompletionDraft(prev =>
-                      prev ? { ...prev, useCurrentTime: false } : prev
-                    )
-                  }
-                >
-                  Elegir fecha manual
-                </Button>
+              <div className="space-y-2">
+                <p className="text-sm font-medium">¿Con qué fecha y hora se registra la ejecucion?</p>
+                <div className="grid gap-2">
+                  <button
+                    type="button"
+                    onClick={() =>
+                      setCompletionDraft(prev =>
+                        prev ? { ...prev, useCurrentTime: true } : prev
+                      )
+                    }
+                    className={cn(
+                      "flex items-center gap-3 rounded border p-3 text-left text-sm transition-colors",
+                      completionDraft.useCurrentTime
+                        ? "border-primary bg-primary/5 font-medium"
+                        : "hover:bg-muted"
+                    )}
+                  >
+                    <span className={cn(
+                      "flex h-4 w-4 shrink-0 items-center justify-center rounded-full border-2",
+                      completionDraft.useCurrentTime ? "border-primary bg-primary" : "border-muted-foreground"
+                    )}>
+                      {completionDraft.useCurrentTime && <span className="h-1.5 w-1.5 rounded-full bg-white" />}
+                    </span>
+                    Fecha y hora actual
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() =>
+                      setCompletionDraft(prev =>
+                        prev ? { ...prev, useCurrentTime: false } : prev
+                      )
+                    }
+                    className={cn(
+                      "flex items-center gap-3 rounded border p-3 text-left text-sm transition-colors",
+                      !completionDraft.useCurrentTime
+                        ? "border-primary bg-primary/5 font-medium"
+                        : "hover:bg-muted"
+                    )}
+                  >
+                    <span className={cn(
+                      "flex h-4 w-4 shrink-0 items-center justify-center rounded-full border-2",
+                      !completionDraft.useCurrentTime ? "border-primary bg-primary" : "border-muted-foreground"
+                    )}>
+                      {!completionDraft.useCurrentTime && <span className="h-1.5 w-1.5 rounded-full bg-white" />}
+                    </span>
+                    Elegir fecha y hora manualmente
+                  </button>
+                </div>
               </div>
 
               {!completionDraft.useCurrentTime && (
                 <div className="space-y-2">
-                  <Label htmlFor="manual-completed-at">Fecha y hora de cierre</Label>
+                  <Label htmlFor="manual-completed-at">Fecha y hora de ejecucion</Label>
                   <Input
                     id="manual-completed-at"
                     type="datetime-local"
@@ -1796,16 +1920,22 @@ export default function GreenhouseMap({
                 </div>
               )}
 
+              <p className="text-xs text-muted-foreground">
+                Solo el supervisor o administrador pueden registrar la ejecucion de tareas.
+              </p>
+
               <div className="flex justify-end gap-2">
                 <Button type="button" variant="outline" onClick={() => setCompletionDraft(null)}>
-                  Cancelar
+                  No, volver
                 </Button>
                 <Button
                   type="button"
+                  className="gap-1.5"
                   onClick={handleCompleteSubmit}
                   disabled={completeMutation.isPending}
                 >
-                  {completeMutation.isPending ? "Guardando..." : "Confirmar cierre"}
+                  <Check className="h-3.5 w-3.5" />
+                  {completeMutation.isPending ? "Guardando..." : "Si, marcar ejecutada"}
                 </Button>
               </div>
             </div>
@@ -1861,6 +1991,39 @@ export default function GreenhouseMap({
               </div>
             </div>
           )}
+        </DialogContent>
+      </Dialog>
+
+      <Dialog
+        open={Boolean(deleteTaskDefinitionId)}
+        onOpenChange={open => { if (!open) setDeleteTaskDefinitionId(null) }}
+      >
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>¿Eliminar tarea del panel?</DialogTitle>
+          </DialogHeader>
+          <div className="space-y-4">
+            <p className="text-sm text-muted-foreground">
+              La tarea se quitara del panel lateral. Las tareas ya asignadas a camas no se veran afectadas.
+            </p>
+            <div className="flex justify-end gap-2">
+              <Button type="button" variant="outline" onClick={() => setDeleteTaskDefinitionId(null)}>
+                Cancelar
+              </Button>
+              <Button
+                type="button"
+                variant="destructive"
+                disabled={deleteTaskDefinitionMutation.isPending}
+                onClick={() => {
+                  if (deleteTaskDefinitionId) {
+                    deleteTaskDefinitionMutation.mutate(deleteTaskDefinitionId)
+                  }
+                }}
+              >
+                {deleteTaskDefinitionMutation.isPending ? "Eliminando..." : "Eliminar"}
+              </Button>
+            </div>
+          </div>
         </DialogContent>
       </Dialog>
 
