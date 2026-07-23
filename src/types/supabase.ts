@@ -14,6 +14,44 @@ export type Database = {
   }
   public: {
     Tables: {
+      greenhouse_row_tasks: {
+        Row: {
+          created_at: string
+          greenhouse_id: string
+          id: string
+          is_enabled: boolean
+          row_number: number
+          task_name: string
+          task_type: "cortar" | "fertilizar" | "quimicos" | "poscosecha"
+        }
+        Insert: {
+          created_at?: string
+          greenhouse_id: string
+          id?: string
+          is_enabled?: boolean
+          row_number: number
+          task_name?: string
+          task_type?: "cortar" | "fertilizar" | "quimicos" | "poscosecha"
+        }
+        Update: {
+          created_at?: string
+          greenhouse_id?: string
+          id?: string
+          is_enabled?: boolean
+          row_number?: number
+          task_name?: string
+          task_type?: "cortar" | "fertilizar" | "quimicos" | "poscosecha"
+        }
+        Relationships: [
+          {
+            foreignKeyName: "greenhouse_row_tasks_greenhouse_id_fkey"
+            columns: ["greenhouse_id"]
+            isOneToOne: false
+            referencedRelation: "greenhouses"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       beds: {
         Row: {
           column_number: number

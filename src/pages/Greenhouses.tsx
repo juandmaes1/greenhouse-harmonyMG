@@ -18,9 +18,9 @@ export default function Greenhouses() {
   const [createOpen, setCreateOpen] = useState(false);
   const [editOpen, setEditOpen] = useState(false);
   const [name, setName] = useState('');
-  const [rows, setRows] = useState(50);
-  const [columns, setColumns] = useState(50);
+  const [columns, setColumns] = useState(10);
   const [editId, setEditId] = useState('');
+  const DEFAULT_ROWS = 16; // 8 arriba del camino + 8 abajo
 
   const currentWeekStart = useMemo(() => {
     const today = new Date()
@@ -79,17 +79,14 @@ export default function Greenhouses() {
     mutationFn: async () => {
       const { data: greenhouse, error: greenhouseError } = await supabase
         .from('greenhouses')
-        .insert({ name, rows, columns })
+        .insert({ name, rows: DEFAULT_ROWS, columns })
         .select()
         .single();
 
-      if (greenhouseError) {
-        throw greenhouseError;
-      }
+      if (greenhouseError) throw greenhouseError;
 
       const beds = [];
-
-      for (let row = 1; row <= rows; row += 1) {
+      for (let row = 1; row <= DEFAULT_ROWS; row += 1) {
         for (let column = 1; column <= columns; column += 1) {
           beds.push({ greenhouse_id: greenhouse.id, row_number: row, column_number: column });
         }
@@ -97,18 +94,34 @@ export default function Greenhouses() {
 
       for (let index = 0; index < beds.length; index += 500) {
         const { error: bedsError } = await supabase.from('beds').insert(beds.slice(index, index + 500));
-
-        if (bedsError) {
-          throw bedsError;
-        }
+        if (bedsError) throw bedsError;
       }
+
+      const defaultRowTaskDefs = [
+        { task_name: 'Corte',         task_type: 'cortar'     as const },
+        { task_name: 'Fertilización', task_type: 'fertilizar' as const },
+        { task_name: 'Químicos',      task_type: 'quimicos'   as const },
+        { task_name: 'Poscosecha',    task_type: 'poscosecha' as const },
+        { task_name: 'Riego',         task_type: 'fertilizar' as const },
+        { task_name: 'Fumigación',    task_type: 'quimicos'   as const },
+        { task_name: 'Tutoreo',       task_type: 'cortar'     as const },
+        { task_name: 'Deshoje',       task_type: 'cortar'     as const },
+      ];
+      const defaultRowTasks = defaultRowTaskDefs.map((def, i) => ({
+        greenhouse_id: greenhouse.id,
+        row_number: i + 1,
+        ...def,
+        is_enabled: true,
+      }));
+
+      const { error: rowTasksError } = await supabase.from('greenhouse_row_tasks').insert(defaultRowTasks);
+      if (rowTasksError) throw rowTasksError;
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['greenhouses'] });
       setCreateOpen(false);
       setName('');
-      setRows(50);
-      setColumns(50);
+      setColumns(10);
       toast({ title: 'Invernadero creado' });
     },
     onError: mutationError =>
@@ -123,22 +136,16 @@ export default function Greenhouses() {
     mutationFn: async () => {
       const { error: greenhouseError } = await supabase
         .from('greenhouses')
-        .update({ name, rows, columns })
+        .update({ name, rows: DEFAULT_ROWS, columns })
         .eq('id', editId);
 
-      if (greenhouseError) {
-        throw greenhouseError;
-      }
+      if (greenhouseError) throw greenhouseError;
 
       const { error: deleteBedsError } = await supabase.from('beds').delete().eq('greenhouse_id', editId);
-
-      if (deleteBedsError) {
-        throw deleteBedsError;
-      }
+      if (deleteBedsError) throw deleteBedsError;
 
       const beds = [];
-
-      for (let row = 1; row <= rows; row += 1) {
+      for (let row = 1; row <= DEFAULT_ROWS; row += 1) {
         for (let column = 1; column <= columns; column += 1) {
           beds.push({ greenhouse_id: editId, row_number: row, column_number: column });
         }
@@ -146,10 +153,7 @@ export default function Greenhouses() {
 
       for (let index = 0; index < beds.length; index += 500) {
         const { error: insertBedsError } = await supabase.from('beds').insert(beds.slice(index, index + 500));
-
-        if (insertBedsError) {
-          throw insertBedsError;
-        }
+        if (insertBedsError) throw insertBedsError;
       }
     },
     onSuccess: () => {
@@ -175,7 +179,7 @@ export default function Greenhouses() {
           </Button>
           <h1 className="font-heading text-xl font-bold">{selected.name}</h1>
           <span className="text-muted-foreground text-sm">
-            {selected.rows} × {selected.columns} camas
+            {selected.columns} camas
           </span>
           {role === 'admin' && (
             <Button
@@ -185,7 +189,6 @@ export default function Greenhouses() {
               onClick={() => {
                 setEditId(selected.id);
                 setName(selected.name);
-                setRows(selected.rows);
                 setColumns(selected.columns);
                 setEditOpen(true);
               }}
@@ -259,7 +262,7 @@ export default function Greenhouses() {
                 </CardHeader>
                 <CardContent>
                   <p className="text-sm text-muted-foreground">
-                    {greenhouse.rows} × {greenhouse.columns} camas
+                    {greenhouse.columns} camas · {greenhouse.rows} filas
                   </p>
                   {!summary || summary.total === 0 ? (
                     <p className="mt-1 text-xs text-muted-foreground">Sin tareas esta semana</p>
@@ -286,27 +289,16 @@ export default function Greenhouses() {
               <label className="text-sm font-medium">Nombre</label>
               <Input value={name} onChange={event => setName(event.target.value)} placeholder="Invernadero 1" />
             </div>
-            <div className="grid grid-cols-2 gap-4">
-              <div>
-                <label className="text-sm font-medium">Filas</label>
-                <Input
-                  type="number"
-                  value={rows}
-                  onChange={event => setRows(Number(event.target.value))}
-                  min={1}
-                  max={100}
-                />
-              </div>
-              <div>
-                <label className="text-sm font-medium">Columnas</label>
-                <Input
-                  type="number"
-                  value={columns}
-                  onChange={event => setColumns(Number(event.target.value))}
-                  min={1}
-                  max={100}
-                />
-              </div>
+            <div>
+              <label className="text-sm font-medium">Número de camas (columnas)</label>
+              <Input
+                type="number"
+                value={columns}
+                onChange={event => setColumns(Number(event.target.value))}
+                min={1}
+                max={200}
+              />
+              <p className="mt-1 text-xs text-muted-foreground">Cada cama tendrá 8 tareas arriba y 8 abajo del camino.</p>
             </div>
           </div>
           <DialogFooter>
@@ -330,30 +322,18 @@ export default function Greenhouses() {
               <label className="text-sm font-medium">Nombre</label>
               <Input value={name} onChange={event => setName(event.target.value)} />
             </div>
-            <div className="grid grid-cols-2 gap-4">
-              <div>
-                <label className="text-sm font-medium">Filas</label>
-                <Input
-                  type="number"
-                  value={rows}
-                  onChange={event => setRows(Number(event.target.value))}
-                  min={1}
-                  max={100}
-                />
-              </div>
-              <div>
-                <label className="text-sm font-medium">Columnas</label>
-                <Input
-                  type="number"
-                  value={columns}
-                  onChange={event => setColumns(Number(event.target.value))}
-                  min={1}
-                  max={100}
-                />
-              </div>
+            <div>
+              <label className="text-sm font-medium">Número de camas (columnas)</label>
+              <Input
+                type="number"
+                value={columns}
+                onChange={event => setColumns(Number(event.target.value))}
+                min={1}
+                max={200}
+              />
             </div>
             <p className="text-xs text-destructive">
-              Cambiar las dimensiones eliminará las camas existentes y sus tareas.
+              Cambiar el número de camas eliminará las camas existentes y sus tareas.
             </p>
           </div>
           <DialogFooter>

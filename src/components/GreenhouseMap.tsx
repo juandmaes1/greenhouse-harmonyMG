@@ -28,6 +28,7 @@ import type { Tables, TablesInsert } from "@/types/supabase"
 type Bed = Tables<"beds">
 type Task = Tables<"tasks">
 type TaskDefinition = Tables<"task_definitions">
+type GreenhouseRowTask = Tables<"greenhouse_row_tasks">
 type TaskInsert = TablesInsert<"tasks">
 type TaskType = Task["task_type"]
 type TaskStatus = Task["status"]
@@ -137,7 +138,12 @@ const getLocalDateOnly = (value: string | null) => {
 }
 
 const getWeekRangeFromStart = (startDate: string) => {
-  const start = new Date(startDate)
+  // Parse date-only strings as LOCAL time to avoid UTC timezone shift.
+  // new Date("2026-05-31") is interpreted as UTC midnight, which in UTC-5
+  // becomes May 30 local — causing a one-day mismatch with stored week_start values.
+  const dateOnly = startDate.split("T")[0]
+  const [year, month, day] = dateOnly.split("-").map(Number)
+  const start = new Date(year, month - 1, day)
   start.setHours(0, 0, 0, 0)
 
   const end = new Date(start)
@@ -278,6 +284,12 @@ export default function GreenhouseMap({
   const [completionDraft, setCompletionDraft] = useState<CompletionDraft | null>(null)
   const [cancellationDraft, setCancellationDraft] = useState<CancellationDraft | null>(null)
   const [deleteTaskDefinitionId, setDeleteTaskDefinitionId] = useState<string | null>(null)
+  const [rowConfigOpen, setRowConfigOpen] = useState(false)
+  const [rowTaskDraft, setRowTaskDraft] = useState<GreenhouseRowTask[]>([])
+  const [columnDetailOpen, setColumnDetailOpen] = useState(false)
+  const [selectedColumnNumber, setSelectedColumnNumber] = useState<number | null>(null)
+  const [selectedColumnZone, setSelectedColumnZone] = useState<"upper" | "lower">("upper")
+  const [assignRowContext, setAssignRowContext] = useState<{ rt: GreenhouseRowTask; bedRowNumber: number } | null>(null)
 
   const viewportWidth = typeof window === "undefined" ? 1024 : window.innerWidth
   const cellSize = Math.max(18, Math.min(45, (viewportWidth * 0.7) / columns))
@@ -404,6 +416,19 @@ export default function GreenhouseMap({
       }
 
       return data ?? []
+    }
+  })
+
+  const { data: rowTasks = [] } = useQuery({
+    queryKey: ["greenhouse-row-tasks", greenhouseId],
+    queryFn: async () => {
+      const { data, error } = await supabase
+        .from("greenhouse_row_tasks")
+        .select("*")
+        .eq("greenhouse_id", greenhouseId)
+        .order("row_number")
+      if (error) return []
+      return (data ?? []) as GreenhouseRowTask[]
     }
   })
 
@@ -579,8 +604,17 @@ export default function GreenhouseMap({
         .filter((bedId): bedId is string => Boolean(bedId))
     ).size
 
+    const byType = (Object.keys(taskLabels) as TaskType[]).reduce(
+      (acc, key) => {
+        acc[key] = visibleTasks.filter(t => t.task_type === key).length
+        return acc
+      },
+      {} as Record<TaskType, number>
+    )
+
     return {
       bedsWithTasks,
+      byType,
       cancelled,
       completed,
       pending,
@@ -692,6 +726,7 @@ export default function GreenhouseMap({
     taskDefinitionId?: string | null
     taskName: string
     taskType: TaskType
+    rowContext?: { rt: GreenhouseRowTask; bedRowNumber: number } | null
   }) => {
     setTaskType(next.taskType)
     setTaskName(next.taskName)
@@ -701,26 +736,29 @@ export default function GreenhouseMap({
     setMode("view")
     setNotes("")
     setSelectedChemical(null)
+    setAssignRowContext(next.rowContext ?? null)
     setAssignDialogOpen(true)
   }
 
   const ensureWeekRecord = async (locked: boolean) => {
-    const { data, error } = await supabase
+    const upsertPromise = supabase
       .from("weeks")
       .upsert(
-        {
-          end_date: weekEnd,
-          is_locked: locked,
-          start_date: weekStart
-        },
+        { end_date: weekEnd, is_locked: locked, start_date: weekStart },
         { onConflict: "start_date" }
       )
       .select("*")
       .maybeSingle()
+      .then(({ data, error }) => {
+        if (error) throw error
+        return data
+      })
 
-    if (error) throw error
+    const timeoutPromise = new Promise<never>((_, reject) =>
+      setTimeout(() => reject(new Error("timeout")), 8000)
+    )
 
-    return data
+    return Promise.race([upsertPromise, timeoutPromise])
   }
 
   const changeWeek = (direction: number) => {
@@ -826,7 +864,10 @@ export default function GreenhouseMap({
       let inserts: TaskInsert[] = []
 
       if (assignToAll) {
-        inserts = beds.map(bed => ({
+        const bedsToAssign = assignRowContext
+          ? beds.filter(bed => bed.row_number === assignRowContext.bedRowNumber)
+          : beds
+        inserts = bedsToAssign.map(bed => ({
           ...baseInsert,
           bed_id: bed.id
         }))
@@ -842,6 +883,10 @@ export default function GreenhouseMap({
             }
           })
           .filter(Boolean) as TaskInsert[]
+
+        if (inserts.length === 0) {
+          throw new Error("No se encontraron las camas seleccionadas. Recarga la pagina e intenta de nuevo.")
+        }
       }
 
       const insertTasksBatched = async (payload: TaskInsert[]): Promise<number> => {
@@ -909,6 +954,7 @@ export default function GreenhouseMap({
       setAssignDialogOpen(false)
       setNotes("")
       setSelectedChemical(null)
+      setAssignRowContext(null)
 
       toast({
         title:
@@ -932,20 +978,20 @@ export default function GreenhouseMap({
         throw new Error("No hay una sesion activa para cerrar la tarea.")
       }
 
-      const { data, error } = await supabase
+      const updatePromise = supabase
         .from("tasks")
-        .update({
-          completed_at: input.completedAt,
-          completed_by: user.id,
-          status: "completed"
-        })
+        .update({ completed_at: input.completedAt, completed_by: user.id, status: "completed" })
         .eq("id", input.task.id)
-        .select("*")
-        .single()
+        .then(({ error }) => { if (error) throw error })
 
-      if (error) throw error
+      await Promise.race([
+        updatePromise,
+        new Promise<never>((_, reject) =>
+          setTimeout(() => reject(new Error("La operacion tardo demasiado. Verifica tu conexion.")), 10000)
+        )
+      ])
 
-      return data as Task
+      return { ...input.task, completed_at: input.completedAt, completed_by: user.id, status: "completed" } as Task
     },
     onSuccess: updatedTask => {
       queryClient.setQueryData<Task[]>(["tasks", greenhouseId], current =>
@@ -972,27 +1018,41 @@ export default function GreenhouseMap({
         throw new Error("No hay una sesion activa para cancelar la tarea.")
       }
 
-      const { data, error } = await supabase
+      const cancelledAt = new Date().toISOString()
+      const cancelledReason = input.reason.trim() || null
+
+      const updatePromise = supabase
         .from("tasks")
         .update({
-          cancelled_at: new Date().toISOString(),
+          cancelled_at: cancelledAt,
           cancelled_by: user.id,
-          cancelled_reason: input.reason.trim() || null,
+          cancelled_reason: cancelledReason,
           status: "cancelled"
         })
         .eq("id", input.task.id)
-        .select("*")
-        .single()
+        .then(({ error }) => {
+          if (error) {
+            if (isMissingDatabaseFeatureError(error)) {
+              throw new Error(getMigrationErrorMessage("la cancelacion de tareas"))
+            }
+            throw error
+          }
+        })
 
-      if (error) {
-        if (isMissingDatabaseFeatureError(error)) {
-          throw new Error(getMigrationErrorMessage("la cancelacion de tareas"))
-        }
+      await Promise.race([
+        updatePromise,
+        new Promise<never>((_, reject) =>
+          setTimeout(() => reject(new Error("La operacion tardo demasiado. Verifica tu conexion.")), 10000)
+        )
+      ])
 
-        throw error
-      }
-
-      return data as Task
+      return {
+        ...input.task,
+        cancelled_at: cancelledAt,
+        cancelled_by: user.id,
+        cancelled_reason: cancelledReason,
+        status: "cancelled"
+      } as Task
     },
     onSuccess: updatedTask => {
       queryClient.setQueryData<Task[]>(["tasks", greenhouseId], current =>
@@ -1076,6 +1136,30 @@ export default function GreenhouseMap({
     onError: (error: Error) => {
       console.error(error)
       toast({ title: "Error", description: error.message })
+    }
+  })
+
+  const saveRowTasksMutation = useMutation({
+    mutationFn: async (draft: GreenhouseRowTask[]) => {
+      const { error } = await supabase.from("greenhouse_row_tasks").upsert(
+        draft.map(rt => ({
+          id: rt.id,
+          greenhouse_id: rt.greenhouse_id,
+          row_number: rt.row_number,
+          task_name: rt.task_name,
+          task_type: rt.task_type,
+          is_enabled: rt.is_enabled,
+        }))
+      )
+      if (error) throw error
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["greenhouse-row-tasks", greenhouseId] })
+      setRowConfigOpen(false)
+      toast({ title: "Configuración de filas guardada" })
+    },
+    onError: (error: Error) => {
+      toast({ title: "Error", description: error.message, variant: "destructive" })
     }
   })
 
@@ -1190,6 +1274,20 @@ export default function GreenhouseMap({
           Filtros
           {activeFilterCount > 0 && <Badge variant="secondary">{activeFilterCount}</Badge>}
         </Button>
+
+        {role === "admin" && rowTasks.length > 0 && (
+          <Button
+            type="button"
+            variant="outline"
+            className="h-auto gap-2 px-5 py-4"
+            onClick={() => {
+              setRowTaskDraft(rowTasks.map(rt => ({ ...rt })))
+              setRowConfigOpen(true)
+            }}
+          >
+            Configurar filas
+          </Button>
+        )}
       </div>
 
       <div className="mb-4 flex flex-wrap gap-2">
@@ -1256,6 +1354,18 @@ export default function GreenhouseMap({
             <p>Pendientes: {summary.pending}</p>
             <p>Canceladas: {summary.cancelled}</p>
           </div>
+          {summary.totalTasks > 0 && (
+            <div className="mt-2 space-y-1 border-t pt-2">
+              <p className="font-medium text-muted-foreground">Por tipo</p>
+              {(Object.entries(taskLabels) as [TaskType, string][]).map(([key, label]) =>
+                summary.byType[key] > 0 ? (
+                  <p key={key}>
+                    {label}: {summary.byType[key]}
+                  </p>
+                ) : null
+              )}
+            </div>
+          )}
         </div>
       </div>
 
@@ -1449,65 +1559,171 @@ export default function GreenhouseMap({
         </div>
 
         <div className="flex-1 overflow-auto rounded border bg-white p-2 shadow-sm">
-          {Array.from({ length: rows }).map((_, rowIndex) => {
-            if (rowIndex === middleRow) {
+          {rowTasks.length > 0 ? (
+            (() => {
+              const makeColumnHeader = (zone: "upper" | "lower") => {
+                const camaOffset = zone === "lower" ? columns : 0
+                return (
+                  <div className="mb-1 flex items-end gap-1">
+                    <div className="w-24 shrink-0" />
+                    {Array.from({ length: columns }).map((_, colIdx) => (
+                      <button
+                        key={colIdx}
+                        type="button"
+                        style={{ width: cellSize }}
+                        className="shrink-0 flex flex-col items-center justify-end pb-0.5 text-center leading-tight text-muted-foreground hover:text-primary hover:underline"
+                        onClick={() => {
+                          setSelectedColumnNumber(colIdx + 1)
+                          setSelectedColumnZone(zone)
+                          setColumnDetailOpen(true)
+                        }}
+                      >
+                        <span className="text-[9px]">Cama</span>
+                        <span className="text-xs font-semibold">{colIdx + 1 + camaOffset}</span>
+                      </button>
+                    ))}
+                  </div>
+                )
+              }
+
+              const enabledRows = rowTasks.filter(rt => rt.is_enabled)
+
+              const renderRow = (rt: GreenhouseRowTask, bedRowOffset: number) => {
+                const bedRow = rt.row_number + bedRowOffset
+                const canAssign = (canScheduleTasks && weekStatus === "future" && !isExplicitlyLocked) || canRegisterUnplanned
+                return (
+                  <div key={`${bedRow}`} className="mb-1 flex items-center gap-1">
+                    <button
+                      type="button"
+                      disabled={!canAssign}
+                      className="w-24 shrink-0 truncate pr-1 text-right text-xs text-muted-foreground transition-colors hover:text-primary hover:underline disabled:cursor-default disabled:no-underline disabled:opacity-60"
+                      title={canAssign ? `Asignar: ${rt.row_number}. ${rt.task_name}` : rt.task_name}
+                      onClick={() => {
+                        const mode: AssignmentMode | null =
+                          canScheduleTasks && weekStatus === "future" && !isExplicitlyLocked
+                            ? "planned"
+                            : canRegisterUnplanned
+                            ? "unplanned"
+                            : null
+                        if (!mode) return
+                        openAssignDialog({
+                          mode,
+                          taskName: rt.task_name,
+                          taskType: rt.task_type,
+                          rowContext: { rt, bedRowNumber: bedRow }
+                        })
+                      }}
+                    >
+                      {rt.row_number}. {rt.task_name}
+                    </button>
+                    {Array.from({ length: columns }).map((_, columnIndex) => {
+                      const key = `${bedRow}-${columnIndex + 1}`
+                      const bedId = bedMap.get(key)
+                      const fullList = bedId ? currentWeekBedTaskMap.get(bedId) ?? [] : []
+                      const filteredList = bedId ? visibleBedTaskMap.get(bedId) ?? [] : []
+                      const displayList = hasActiveFilters ? filteredList : fullList
+                      const matchesFilters = bedId ? visibleBedIds.has(bedId) : false
+                      const hiddenByFilter = hasActiveFilters && !matchesFilters
+
+                      return (
+                        <button
+                          key={key}
+                          type="button"
+                          disabled={hiddenByFilter}
+                          onClick={() => {
+                            if (mode === "view") openBedDetail(key)
+                          }}
+                          onMouseDown={event => {
+                            if (mode === "select" && event.button === 0) {
+                              setIsDragging(true)
+                              toggleBedSelection(key)
+                            }
+                          }}
+                          onMouseEnter={() => {
+                            if (isDragging && mode === "select") toggleBedSelection(key)
+                          }}
+                          style={{ height: cellSize, width: cellSize }}
+                          className={cn(
+                            "rounded border transition-all",
+                            getColor(displayList),
+                            hiddenByFilter && "border-transparent bg-transparent opacity-10 shadow-none",
+                            matchesFilters && hasActiveFilters && "ring-2 ring-sky-500 ring-offset-1",
+                            selectedBeds.has(key) && "ring-2 ring-black ring-offset-1"
+                          )}
+                          title={`${rt.task_name} · Cama ${columnIndex + 1}`}
+                        />
+                      )
+                    })}
+                  </div>
+                )
+              }
+
               return (
-                <div key="camino" className="mb-1 rounded bg-gray-200 py-1 text-center text-sm">
-                  Camino
+                <>
+                  {makeColumnHeader("upper")}
+                  {enabledRows.map(rt => renderRow(rt, 0))}
+                  {enabledRows.length > 0 && (
+                    <div className="my-2 rounded bg-gray-200 py-1 text-center text-sm">Camino</div>
+                  )}
+                  {makeColumnHeader("lower")}
+                  {enabledRows.map(rt => renderRow(rt, 8))}
+                </>
+              )
+            })()
+          ) : (
+            Array.from({ length: rows }).map((_, rowIndex) => {
+              if (rowIndex === middleRow) {
+                return (
+                  <div key="camino" className="mb-1 rounded bg-gray-200 py-1 text-center text-sm">
+                    Camino
+                  </div>
+                )
+              }
+
+              return (
+                <div key={rowIndex} className="mb-1 flex gap-1">
+                  {Array.from({ length: columns }).map((_, columnIndex) => {
+                    const key = `${rowIndex + 1}-${columnIndex + 1}`
+                    const bedId = bedMap.get(key)
+                    const fullList = bedId ? currentWeekBedTaskMap.get(bedId) ?? [] : []
+                    const filteredList = bedId ? visibleBedTaskMap.get(bedId) ?? [] : []
+                    const displayList = hasActiveFilters ? filteredList : fullList
+                    const matchesFilters = bedId ? visibleBedIds.has(bedId) : false
+                    const hiddenByFilter = hasActiveFilters && !matchesFilters
+
+                    return (
+                      <button
+                        key={key}
+                        type="button"
+                        disabled={hiddenByFilter}
+                        onClick={() => {
+                          if (mode === "view") openBedDetail(key)
+                        }}
+                        onMouseDown={event => {
+                          if (mode === "select" && event.button === 0) {
+                            setIsDragging(true)
+                            toggleBedSelection(key)
+                          }
+                        }}
+                        onMouseEnter={() => {
+                          if (isDragging && mode === "select") toggleBedSelection(key)
+                        }}
+                        style={{ height: cellSize, width: cellSize }}
+                        className={cn(
+                          "rounded border transition-all",
+                          getColor(displayList),
+                          hiddenByFilter && "border-transparent bg-transparent opacity-10 shadow-none",
+                          matchesFilters && hasActiveFilters && "ring-2 ring-sky-500 ring-offset-1",
+                          selectedBeds.has(key) && "ring-2 ring-black ring-offset-1"
+                        )}
+                        title={key}
+                      />
+                    )
+                  })}
                 </div>
               )
-            }
-
-            return (
-              <div key={rowIndex} className="mb-1 flex gap-1">
-                {Array.from({ length: columns }).map((_, columnIndex) => {
-                  const key = `${rowIndex + 1}-${columnIndex + 1}`
-                  const bedId = bedMap.get(key)
-                  const fullList = bedId ? currentWeekBedTaskMap.get(bedId) ?? [] : []
-                  const filteredList = bedId ? visibleBedTaskMap.get(bedId) ?? [] : []
-                  const displayList = hasActiveFilters ? filteredList : fullList
-                  const matchesFilters = bedId ? visibleBedIds.has(bedId) : false
-                  const hiddenByFilter = hasActiveFilters && !matchesFilters
-
-                  return (
-                    <button
-                      key={key}
-                      type="button"
-                      disabled={hiddenByFilter}
-                      onClick={() => {
-                        if (mode === "view") {
-                          openBedDetail(key)
-                        }
-                      }}
-                      onMouseDown={event => {
-                        if (mode === "select" && event.button === 0) {
-                          setIsDragging(true)
-                          toggleBedSelection(key)
-                        }
-                      }}
-                      onMouseEnter={() => {
-                        if (isDragging && mode === "select") {
-                          toggleBedSelection(key)
-                        }
-                      }}
-                      style={{ height: cellSize, width: cellSize }}
-                      className={cn(
-                        "rounded border transition-all",
-                        getColor(displayList),
-                        hiddenByFilter &&
-                          "border-transparent bg-transparent opacity-10 shadow-none",
-                        matchesFilters &&
-                          hasActiveFilters &&
-                          "ring-2 ring-sky-500 ring-offset-1",
-                        selectedBeds.has(key) && "ring-2 ring-black ring-offset-1"
-                      )}
-                      title={key}
-                    />
-                  )
-                })}
-              </div>
-            )
-          })}
+            })
+          )}
         </div>
       </div>
 
@@ -1623,6 +1839,14 @@ export default function GreenhouseMap({
                 Tipo: {taskLabels[taskType]} · Semana {formatDate(currentWeek.start_date)} →{" "}
                 {formatDate(currentWeek.end_date)}
               </p>
+              {assignRowContext && (
+                <p className="mt-1 text-xs font-medium text-primary">
+                  Fila {assignRowContext.rt.row_number}. {assignRowContext.rt.task_name} ·{" "}
+                  {assignRowContext.bedRowNumber > 8
+                    ? `Camas ${columns + 1}–${columns * 2} (zona inferior)`
+                    : `Camas 1–${columns} (zona superior)`}
+                </p>
+              )}
             </div>
 
             <div className="space-y-2">
@@ -1662,7 +1886,11 @@ export default function GreenhouseMap({
                 onClick={() => assignMutation.mutate(true)}
                 disabled={assignMutation.isPending}
               >
-                {assignMutation.isPending ? "Guardando..." : "Todas"}
+                {assignMutation.isPending
+                  ? "Guardando..."
+                  : assignRowContext
+                  ? "Todas las camas"
+                  : "Todas"}
               </Button>
 
               <Button
@@ -1710,7 +1938,18 @@ export default function GreenhouseMap({
         <DialogContent className="max-h-[90vh] overflow-y-auto">
           <DialogHeader>
             <DialogTitle>
-              Detalle {selectedBedDetail ? `de cama ${selectedBedDetail.bedKey}` : ""}
+              {selectedBedDetail ? (() => {
+                const [rowStr, colStr] = selectedBedDetail.bedKey.split("-")
+                const bedRow = Number(rowStr)
+                const colNum = Number(colStr)
+                const isLower = bedRow > 8
+                const taskRow = isLower ? bedRow - 8 : bedRow
+                const rt = rowTasks.find(r => r.row_number === taskRow)
+                const camaNum = isLower ? colNum + columns : colNum
+                return rt
+                  ? `${rt.row_number}. ${rt.task_name} · Cama ${camaNum}`
+                  : `Cama ${camaNum}`
+              })() : "Detalle"}
             </DialogTitle>
           </DialogHeader>
 
@@ -2070,7 +2309,6 @@ export default function GreenhouseMap({
               />
               <span>Dejar esta tarea permanente en la fila lateral</span>
             </label>
-
             {!newTaskPermanent && (
               <p className="text-xs text-muted-foreground">
                 Si no es permanente, solo quedara disponible para la semana seleccionada.
@@ -2084,6 +2322,171 @@ export default function GreenhouseMap({
               disabled={createTaskDefinitionMutation.isPending}
             >
               {createTaskDefinitionMutation.isPending ? "Guardando..." : "Guardar"}
+            </Button>
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={columnDetailOpen} onOpenChange={setColumnDetailOpen}>
+        <DialogContent className="max-h-[90vh] overflow-y-auto">
+          <DialogHeader>
+            <DialogTitle>
+              {selectedColumnNumber !== null
+                ? `Cama ${selectedColumnZone === "lower" ? selectedColumnNumber + columns : selectedColumnNumber}`
+                : "Detalle de cama"}
+            </DialogTitle>
+          </DialogHeader>
+
+          {selectedColumnNumber !== null && rowTasks.length > 0 && (() => {
+            const enabledRows = rowTasks.filter(rt => rt.is_enabled)
+            const bedRowOffset = selectedColumnZone === "lower" ? 8 : 0
+
+            return (
+              <div className="space-y-2 mt-2">
+                {enabledRows.map(rt => {
+                  const bedRow = rt.row_number + bedRowOffset
+                  const key = `${bedRow}-${selectedColumnNumber}`
+                  const bedId = bedMap.get(key)
+                  const taskList = bedId ? (currentWeekBedTaskMap.get(bedId) ?? []) : []
+
+                  return (
+                    <div key={bedRow} className="rounded border p-3 space-y-1">
+                      <p className="text-sm font-semibold">{rt.row_number}. {rt.task_name}</p>
+                      {taskList.length === 0 ? (
+                        <p className="text-xs text-muted-foreground">Sin tarea asignada esta semana</p>
+                      ) : (
+                        taskList.map(task => (
+                          <div key={task.id} className="space-y-1">
+                            <div className="flex flex-wrap items-center gap-1.5">
+                              <Badge
+                                variant={
+                                  task.status === "completed"
+                                    ? "default"
+                                    : task.status === "cancelled"
+                                    ? "secondary"
+                                    : "outline"
+                                }
+                              >
+                                {statusLabels[task.status]}
+                              </Badge>
+                              {task.is_unplanned && (
+                                <Badge className="bg-orange-500 text-white hover:bg-orange-500 text-xs">
+                                  Imprevisto
+                                </Badge>
+                              )}
+                              <span className="text-xs text-muted-foreground">{getTaskDisplayName(task)}</span>
+                            </div>
+                            <p className="text-xs text-gray-500">
+                              Creada: {formatDateTime(task.created_at)}
+                              {task.assigned_by && profileMap.get(task.assigned_by) && (
+                                <> · {profileMap.get(task.assigned_by)}</>
+                              )}
+                            </p>
+                            {task.status === "completed" && task.completed_at && (
+                              <p className="text-xs text-green-700">
+                                Ejecutada: {formatDateTime(task.completed_at)}
+                                {task.completed_by && profileMap.get(task.completed_by) && (
+                                  <> · {profileMap.get(task.completed_by)}</>
+                                )}
+                              </p>
+                            )}
+                            {task.status === "cancelled" && task.cancelled_at && (
+                              <p className="text-xs text-slate-600">
+                                Cancelada: {formatDateTime(task.cancelled_at)}
+                                {task.cancelled_reason && <> · {task.cancelled_reason}</>}
+                              </p>
+                            )}
+                            {task.chemical_id && (
+                              <p className="text-xs text-blue-700">
+                                Químico: {chemicalMap.get(task.chemical_id) ?? "—"}
+                              </p>
+                            )}
+                            {task.notes && (
+                              <p className="text-xs italic text-gray-600">{task.notes}</p>
+                            )}
+                          </div>
+                        ))
+                      )}
+                    </div>
+                  )
+                })}
+              </div>
+            )
+          })()}
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={rowConfigOpen} onOpenChange={setRowConfigOpen}>
+        <DialogContent className="max-h-[90vh] overflow-y-auto">
+          <DialogHeader>
+            <DialogTitle>Configurar filas</DialogTitle>
+          </DialogHeader>
+          <div className="space-y-3">
+            <p className="text-sm text-muted-foreground">
+              Asigna un nombre y tipo a cada fila. Deshabilita las filas que no uses para que no aparezcan en el mapa.
+            </p>
+            {rowTaskDraft.map((rt, idx) => (
+              <div key={rt.row_number} className="flex items-center gap-2 rounded border p-3">
+                <span className="w-6 shrink-0 text-center text-xs font-medium text-muted-foreground">
+                  {rt.row_number}
+                </span>
+                <Input
+                  className="h-8 flex-1 text-sm"
+                  value={rt.task_name}
+                  onChange={e => {
+                    const updated = [...rowTaskDraft]
+                    updated[idx] = { ...updated[idx], task_name: e.target.value }
+                    setRowTaskDraft(updated)
+                  }}
+                  placeholder={`Tarea ${rt.row_number}`}
+                />
+                <Select
+                  value={rt.task_type}
+                  onValueChange={value => {
+                    const updated = [...rowTaskDraft]
+                    updated[idx] = { ...updated[idx], task_type: value as TaskType }
+                    setRowTaskDraft(updated)
+                  }}
+                >
+                  <SelectTrigger className="h-8 w-32 text-xs">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {Object.entries(taskLabels).map(([key, label]) => (
+                      <SelectItem key={key} value={key} className="text-xs">
+                        {label}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+                <button
+                  type="button"
+                  onClick={() => {
+                    const updated = [...rowTaskDraft]
+                    updated[idx] = { ...updated[idx], is_enabled: !updated[idx].is_enabled }
+                    setRowTaskDraft(updated)
+                  }}
+                  className={cn(
+                    "shrink-0 rounded border px-2 py-1 text-xs transition-colors",
+                    rt.is_enabled
+                      ? "border-green-300 bg-green-50 text-green-700 hover:bg-green-100"
+                      : "border-gray-200 bg-gray-50 text-gray-400 hover:bg-gray-100"
+                  )}
+                >
+                  {rt.is_enabled ? "Activa" : "Inactiva"}
+                </button>
+              </div>
+            ))}
+          </div>
+          <div className="mt-4 flex justify-end gap-2">
+            <Button variant="outline" onClick={() => setRowConfigOpen(false)}>
+              Cancelar
+            </Button>
+            <Button
+              onClick={() => saveRowTasksMutation.mutate(rowTaskDraft)}
+              disabled={saveRowTasksMutation.isPending}
+            >
+              {saveRowTasksMutation.isPending ? "Guardando..." : "Guardar"}
             </Button>
           </div>
         </DialogContent>
